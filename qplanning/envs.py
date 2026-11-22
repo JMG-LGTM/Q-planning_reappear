@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Any
 
 from qplanning.benchmarks import libero as libero_bench
@@ -23,12 +24,22 @@ if TYPE_CHECKING:
     from qplanning.config.schema import RunConfig
 
 
+def _suite_adapter(suite: str) -> Any:
+    """Look up an external LIBERO suite by name, leaving built-in suites to LeRobot."""
+    if suite in libero_bench.SUITES:
+        return None
+    matches = tuple(entry_points(group="qplanning.env_adapters", name=suite))
+    if len(matches) > 1:
+        raise ValueError(f"multiple environment adapters are registered for {suite!r}")
+    return matches[0].load() if matches else None
+
+
 def resolve_tasks(cfg: "RunConfig") -> list[str]:
     """The task names this run will evaluate, in a stable order."""
     if cfg.benchmark.env_type == "robotwin":
         return robotwin_bench.resolve_tasks(cfg.benchmark.tasks)
     suite = cfg.benchmark.suite or cfg.benchmark.name
-    if suite not in libero_bench.SUITES:
+    if suite not in libero_bench.SUITES and _suite_adapter(suite) is None:
         raise ValueError(f"unknown LIBERO suite {suite!r}; expected one of {libero_bench.SUITES}")
     return [suite]
 
@@ -60,6 +71,9 @@ def apply_shard(tasks: list[str], shard: str | None) -> list[str]:
 def build_env_config(cfg: "RunConfig", task: str) -> Any:
     """Construct the LeRobot environment config for one task."""
     if cfg.benchmark.env_type == "libero":
+        adapter = _suite_adapter(task)
+        if adapter is not None:
+            return adapter.build_config(cfg, task)
         from lerobot.envs.configs import LiberoEnv
 
         return LiberoEnv(
@@ -84,6 +98,13 @@ def build_env_config(cfg: "RunConfig", task: str) -> Any:
 @contextmanager
 def open_task_envs(cfg: "RunConfig", task: str) -> Iterator[tuple[Any, dict[int, Any]]]:
     """Yield ``(env_config, {task_id: vector_env})`` for one task, closing them afterwards."""
+    if cfg.benchmark.env_type == "libero":
+        adapter = _suite_adapter(task)
+        if adapter is not None:
+            env_cfg = adapter.build_config(cfg, task)
+            with adapter.open(cfg, env_cfg) as per_task:
+                yield env_cfg, per_task
+            return
     from lerobot.envs.factory import make_env
 
     env_cfg = build_env_config(cfg, task)

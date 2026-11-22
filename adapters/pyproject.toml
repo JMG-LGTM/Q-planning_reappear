@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scene24-qplanning-adapters"
+version = "0.1.0"
+requires-python = ">=3.11"
+description = "Scene24 and OpenPI interfaces for the Q-Planning runner"
+
+[project.entry-points."qplanning.env_adapters"]
+scene24_l1 = "scene24_qplanning.environment:Scene24Suite"
+
+[project.entry-points."qplanning.bc_adapters"]
+openpi_pi05 = "scene24_qplanning.pi05:OpenPIAdapter"
+
+[tool.setuptools.packages.find]
+include = ["scene24_qplanning*"]

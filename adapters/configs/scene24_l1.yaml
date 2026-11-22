@@ -1,0 +1,56 @@
+extends: ../../configs/base.yaml
+run_name: scene24_l1
+seed: 0
+paths:
+  bc_checkpoint: ${env:OPENPI_CHECKPOINT:}
+  q_checkpoint: ${env:QPLANNING_Q_CHECKPOINT:}
+  dataset_root: ${env:QPLANNING_DATASET_ROOT:}
+bc:
+  type: openpi_pi05
+  baseline_denoise_steps: 10
+  extra:
+    n_action_steps: 8
+    episode_protocol:
+      num_initial_states: 10
+      eval_seed_start: 0
+      # TRAIN_SEED_STRIDE in the pinned upstream collection loop.
+      upstream_train_seed_offset: 1000000
+      train_seed_base: 3000
+      train_round_stride: 1000
+      first_collection_round: 1
+benchmark:
+  name: scene24_l1
+  env_type: libero
+  suite: scene24_l1
+  episode_length: 950
+  observation_height: 256
+  observation_width: 256
+execution:
+  n_action_steps: 8
+qfunction:
+  h: 10
+  camera_keys: [observation.images.image, observation.images.wrist_image]
+planner:
+  type: q_weighted
+  n_samples: 64
+  n_elites: 16
+  denoise_steps: 3
+  temperature: 1.0
+eval:
+  episodes_per_task: 100
+  start_seed: 0
+train_q:
+  steps: 40000
+  batch_size: 48
+  save_freq: 1000
+  dataset:
+    repo_ids: [demos_bc_v1]
+    bucket_overrides: {demos_bc_v1: q5}
+self_improve:
+  iterations: 3
+  train_episodes_per_task: 200
+  heldout_episodes_per_task: 0
+  finetune_steps: 200
+  finetune_lr: 1.0e-5
+  batch_size: 48
+  online_fraction: 0.5
