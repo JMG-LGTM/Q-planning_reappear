@@ -12,6 +12,9 @@ import numpy as np
 from . import episode_policy_seed
 
 
+_CAMERAS = {"image": "agentview", "wrist_image": "robot0_eye_in_hand"}
+
+
 def register_bowls(assets):
     from libero.libero.envs.base_object import OBJECTS_DICT, register_object
     from robosuite.models.objects import MujocoXMLObject
@@ -52,6 +55,8 @@ class Scene24Env(gym.Env):
                                  weights_only=True).numpy()
         self.seed_pair = seed_pair
         self._max_episode_steps = max_steps
+        self._camera_width = width
+        self._camera_height = height
         self.action_space = gym.spaces.Box(-1.0, 1.0, (7,), dtype=np.float32)
         rgb = gym.spaces.Box(0, 255, (height, width, 3), dtype=np.uint8)
         self.observation_space = gym.spaces.Dict({
@@ -62,8 +67,8 @@ class Scene24Env(gym.Env):
         self.sim = OffScreenRenderEnv(
             bddl_file_name=str(snapshot / manifest["files"]["bddl"]),
             scene_xml=str((root / "assets/scenes/libero_kitchen_tabletop_base_style.xml").resolve()),
-            camera_heights=height, camera_widths=width,
-            camera_names=("agentview", "robot0_eye_in_hand"),
+            use_camera_obs=False, camera_heights=height, camera_widths=width,
+            camera_names=tuple(_CAMERAS.values()),
             control_freq=20, horizon=max_steps,
         )
         self._last_obs = None
@@ -71,9 +76,12 @@ class Scene24Env(gym.Env):
     def _observation(self, raw):
         from robosuite.utils.transform_utils import quat2axisangle
 
+        self.camera_raw = {
+            name: self.sim.sim.render(width=self._camera_width, height=self._camera_height, camera_name=camera)
+            for name, camera in _CAMERAS.items()
+        }
         state = np.concatenate((raw["robot0_eef_pos"], quat2axisangle(raw["robot0_eef_quat"]),
                                 raw["robot0_gripper_qpos"])).astype(np.float32)
-        self.camera_raw = {"image": raw["agentview_image"], "wrist_image": raw["robot0_eye_in_hand_image"]}
         self._last_obs = {
             "pixels": {name: np.ascontiguousarray(image[::-1]) for name, image in self.camera_raw.items()},
             "agent_pos": state,
@@ -97,6 +105,8 @@ class Scene24Env(gym.Env):
 
     def step(self, action):
         raw, _, done, _ = self.sim.step(np.asarray(action))
+        # Refresh derived body and camera poses after the final physics substep.
+        self.sim.sim.forward()
         self.elapsed += 1
         success = bool(done)
         return (self._observation(raw), float(success), success,
