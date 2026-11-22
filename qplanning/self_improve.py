@@ -26,6 +26,9 @@ from typing import TYPE_CHECKING, Any
 from qplanning.config.loader import ConfigError, dump, load, load_dotenv
 from qplanning.data.online_buffer import (
     EPISODES_DIRNAME,
+    EpisodeParts,
+    collection_name,
+    incomplete_parts,
     OnlineQDataset,
     iteration_dir,
     save_iteration,
@@ -113,9 +116,13 @@ def _task_description(env: Any) -> str:
     return ""
 
 
+class CollectionWriteError(RuntimeError):
+    """Storage errors must propagate through the per-task rollout error handler."""
+
+
 def collect(cfg: "RunConfig", iteration: int, policy: Any, processors: dict[str, Any],
             camera_key_map: dict[str, str]) -> tuple[list[dict], list[EpisodeRecord], list[str]]:
-    """Roll out the held-out and training blocks for this job's tasks."""
+    """Return training episodes, or lightweight per-episode records when flushing to disk."""
     si = cfg.self_improve
     all_tasks = resolve_tasks(cfg)
     shard = cfg.eval.shard
@@ -126,6 +133,10 @@ def collect(cfg: "RunConfig", iteration: int, policy: Any, processors: dict[str,
     index_of = {task: i for i, task in enumerate(all_tasks)}
     train_seed_base = cfg.seed + iteration * max(1, si.train_episodes_per_task) * len(all_tasks)
 
+    parts = None
+    if si.flush_every:
+        job = iteration_dir(Path(cfg.paths.output_dir), iteration, _shard_index(shard))
+        parts = EpisodeParts(job, cfg, iteration, _offline_image_shape(si.offline.root))
     saved: list[dict] = []
     heldout: list[EpisodeRecord] = []
     failed: list[str] = []
@@ -154,10 +165,21 @@ def collect(cfg: "RunConfig", iteration: int, policy: Any, processors: dict[str,
                         for src, dst in camera_key_map.items():
                             if src in episode:
                                 episode[dst] = episode.pop(src)
-                        saved.append(episode)
+                        if parts is None:
+                            saved.append(episode)
+                        else:
+                            try:
+                                parts.append(episode, seed)
+                            except Exception as exc:
+                                raise CollectionWriteError(f"could not save collection at seed {seed}") from exc
+                            saved.append({"seed": seed, "success": bool(episode["success"]),
+                                          "episode_length": len(episode["action"])})
+                            del episode
 
                     n_ok = sum(r.success for r in heldout if r.task_name == label)
                     log.info("  %-38s held-out %d/%d", label, n_ok, si.heldout_episodes_per_task)
+        except CollectionWriteError:
+            raise
         except Exception as exc:  # noqa: BLE001
             # One task must not cost the whole iteration; three RoboTwin tasks raise from
             # their own success check under any learned policy.
@@ -168,6 +190,8 @@ def collect(cfg: "RunConfig", iteration: int, policy: Any, processors: dict[str,
         log.warning("%d task(s) skipped: %s", len(failed), ", ".join(failed))
     if not saved:
         raise RuntimeError("collected no training episodes; every task errored")
+    if parts is not None:
+        parts.finish(len(saved), len(heldout), failed)
     return saved, heldout, failed
 
 
@@ -192,9 +216,10 @@ def finetune(cfg: "RunConfig", q_policy: Any, output_dir: Path, checkpoint_dir: 
         log.warning("%d shard(s) quarantined as unreadable: %s", len(quarantined),
                     ", ".join(p.parent.name for p in quarantined))
     minimum = si.resolved_min_shards()
-    if len(good) < minimum:
+    jobs = {collection_name(path) for path in good}
+    if len(jobs) < minimum:
         raise RuntimeError(
-            f"only {len(good)} readable shard(s) in {output_dir}, need at least {minimum}. "
+            f"only {len(jobs)} readable shard(s) in {output_dir}, need at least {minimum}. "
             "Re-run the collection stage for the missing shards rather than training on a "
             "partial iteration."
         )
@@ -205,21 +230,16 @@ def finetune(cfg: "RunConfig", q_policy: Any, output_dir: Path, checkpoint_dir: 
         terminal_bonus=1.0,
         camera_keys=tuple(q_policy.config.camera_keys),
     )
-    if quarantined:
-        # OnlineQDataset globs the buffer itself, so a torn shard would be loaded anyway
-        # and fail mid-epoch. Refuse instead: the fix is to re-collect that shard.
-        raise RuntimeError(
-            f"{len(quarantined)} shard(s) are unreadable and would fail partway through "
-            "training: " + ", ".join(p.parent.name for p in quarantined)
-            + ". Delete them and re-run the collect stage for those shards."
-        )
+    # A concurrently publishing job may appear between validation and the reader's own glob.
+    if incomplete_parts([Path(ds.root) for ds in online._sub_datasets]):
+        raise RuntimeError("the online reader opened an incomplete set of collection parts")
     offline = load_demonstrations(si.offline.repo_ids, si.offline.root or "", q_policy)
     log.info("buffer: %d online frames over %d shard(s); %d demonstration frames",
              len(online), len(good), len(offline))
 
     loader = build_mixture_loader(
         offline, online,
-        steps=si.finetune_steps, batch_size=si.batch_size, online_fraction=si.online_fraction,
+        steps=si.finetune_steps, batch_size=si.batch_size * si.grad_accum_steps, online_fraction=si.online_fraction,
     )
     preprocess = make_q_train_preprocessor(source_checkpoint)
 
@@ -245,8 +265,14 @@ def finetune(cfg: "RunConfig", q_policy: Any, output_dir: Path, checkpoint_dir: 
             batch = next(iterator)
 
         optimizer.zero_grad()
-        loss, loss_dict = q_policy.forward(preprocess(batch))
-        loss.backward()
+        if si.grad_accum_steps == 1:
+            loss, loss_dict = q_policy.forward(preprocess(batch))
+            loss.backward()
+        else:
+            from qplanning.grad_accumulation import backward_microbatches
+
+            _, loss_dict = backward_microbatches(q_policy, batch, si.grad_accum_steps,
+                                                 preprocess=preprocess, backward=torch.autograd.backward)
         grad_norm = torch.nn.utils.clip_grad_norm_(q_policy.parameters(), si.grad_clip_norm)
         optimizer.step()
         q_policy.update()          # EMA update of the target parameters
@@ -346,18 +372,21 @@ def run(cfg: "RunConfig", stage: str = "all") -> int:
                                                 _camera_key_map(cfg))
             iter_out.mkdir(parents=True, exist_ok=True)
             write_episodes(heldout, iter_out / "heldout_episodes.csv")
-            save_iteration(
-                episodes, iter_out / EPISODES_DIRNAME,
-                camera_keys=tuple(cfg.qfunction.camera_keys),
-                image_shape=_offline_image_shape(si.offline.root),
-                action_dim=int(episodes[0]["action"].shape[1]),
-                manifest={
-                    "iteration": iteration, "shard": cfg.eval.shard,
-                    "q_checkpoint": source_checkpoint, "planner": cfg.planner.type,
-                    "n_saved": len(episodes), "n_heldout": len(heldout),
-                    "failed_tasks": failed,
-                },
-            )
+            if not si.flush_every:
+                if any(output_dir.glob(iter_out.name + "_part*/" + EPISODES_DIRNAME)):
+                    raise FileExistsError(f"partitioned episodes already exist for {iter_out}")
+                save_iteration(
+                    episodes, iter_out / EPISODES_DIRNAME,
+                    camera_keys=tuple(cfg.qfunction.camera_keys),
+                    image_shape=_offline_image_shape(si.offline.root),
+                    action_dim=int(episodes[0]["action"].shape[1]),
+                    manifest={
+                        "iteration": iteration, "shard": cfg.eval.shard,
+                        "q_checkpoint": source_checkpoint, "planner": cfg.planner.type,
+                        "n_saved": len(episodes), "n_heldout": len(heldout),
+                        "failed_tasks": failed,
+                    },
+                )
             rate = 100 * sum(r.success for r in heldout) / max(len(heldout), 1)
             metrics.update({"heldout_success": rate, "n_heldout": len(heldout),
                             "n_collected": len(episodes), "failed_tasks": failed})

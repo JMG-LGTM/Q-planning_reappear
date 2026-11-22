@@ -94,7 +94,7 @@ def build_argv(cfg: "RunConfig") -> list[str]:
         f"--dataset.root={resolver.resolve(dataset_root).path or dataset_root}",
         f"--dataset.use_imagenet_stats={str(train.dataset.use_imagenet_stats).lower()}",
         # Schedule.
-        f"--batch_size={train.batch_size}",
+        f"--batch_size={train.batch_size * train.grad_accum_steps}",
         f"--steps={train.steps}",
         f"--save_freq={train.save_freq}",
         f"--log_freq={train.log_freq}",
@@ -124,7 +124,10 @@ def build_argv(cfg: "RunConfig") -> list[str]:
         resume = Path(str(resolver.resolve(train.resume_from).path or train.resume_from))
         args += [f"--config_path={resume / 'train_config.json'}", "--resume=true"]
 
-    launcher = [sys.executable, "-m", "lerobot.scripts.lerobot_train"]
+    module = ["-m", "lerobot.scripts.lerobot_train"]
+    if train.grad_accum_steps > 1:
+        module = ["-m", "qplanning.grad_accumulation", str(train.batch_size), str(train.grad_accum_steps)]
+    launcher = [sys.executable, *module]
     if train.num_gpus > 1:
         launcher = [
             "accelerate", "launch",
@@ -132,7 +135,7 @@ def build_argv(cfg: "RunConfig") -> list[str]:
             "--multi_gpu",
             "--mixed_precision=bf16",
             f"--main_process_port={_free_port()}",
-            "-m", "lerobot.scripts.lerobot_train",
+            *module,
         ]
     return [*launcher, *args]
 

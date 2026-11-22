@@ -41,7 +41,9 @@ eval:
   start_seed: 0
 train_q:
   steps: 40000
-  batch_size: 48
+  batch_size: 24
+  grad_accum_steps: 2
+  num_gpus: 1
   save_freq: 1000
   dataset:
     repo_ids: [demos_bc_v1]
@@ -52,5 +54,7 @@ self_improve:
   heldout_episodes_per_task: 0
   finetune_steps: 200
   finetune_lr: 1.0e-5
-  batch_size: 48
+  batch_size: 12
+  grad_accum_steps: 4
+  flush_every: 4
   online_fraction: 0.5

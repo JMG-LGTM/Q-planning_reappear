@@ -196,6 +196,11 @@ class TrainQConfig:
     resume_from: Optional[str] = None
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
+    grad_accum_steps: int = 1       # batch_size is the per-device microbatch size
+
+    def __post_init__(self) -> None:
+        if self.grad_accum_steps < 1:
+            raise ValueError("train_q.grad_accum_steps must be positive")
 
 
 @dataclass
@@ -223,7 +228,14 @@ class SelfImproveConfig:
     offline: DatasetConfig = field(default_factory=DatasetConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
+    grad_accum_steps: int = 1       # batch_size is the microbatch size
+    flush_every: int = 0           # training episodes per buffer part; zero writes the whole collection
+
     def __post_init__(self) -> None:
+        if self.grad_accum_steps < 1:
+            raise ValueError("self_improve.grad_accum_steps must be positive")
+        if self.flush_every < 0:
+            raise ValueError("self_improve.flush_every must be non-negative")
         if not 0.0 <= self.online_fraction <= 1.0:
             raise ValueError(f"self_improve.online_fraction must be in [0,1], got {self.online_fraction}")
         if self.collect_shards < 1:
