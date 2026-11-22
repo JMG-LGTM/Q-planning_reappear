@@ -50,7 +50,7 @@ train_q:
     bucket_overrides: {demos_bc_v1: q5}
 self_improve:
   iterations: 3
-  train_episodes_per_task: 200
+  train_episodes_per_task: 100
   heldout_episodes_per_task: 0
   finetune_steps: 200
   finetune_lr: 1.0e-5
