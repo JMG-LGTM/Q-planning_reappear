@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager, nullcontext
-from functools import partial
+from contextlib import ExitStack, contextmanager, nullcontext
+from functools import partial, wraps
 import sys
 import time
 from unittest.mock import patch
@@ -145,12 +145,36 @@ def offline_accumulation(trainer, micro_size, steps):
         yield
 
 
+@contextmanager
+def offline_updates(trainer, micro_size, steps, allow_bicubic):
+    """Enter the configured update path after the trainer sets its deterministic flags."""
+    from qplanning.utils.backward_warnings import count_backward_warnings
+
+    with ExitStack() as stack:
+        if steps > 1:
+            stack.enter_context(offline_accumulation(trainer, micro_size, steps))
+        tally = stack.enter_context(count_backward_warnings(allow_bicubic))
+        if allow_bicubic:
+            update = trainer.update_policy
+
+            @wraps(update)
+            def guarded_update(*args, **kwargs):
+                with tally.during_update():
+                    return update(*args, **kwargs)
+
+            stack.enter_context(patch.object(trainer, "update_policy", guarded_update))
+        yield tally
+
+
 def main():
     from lerobot.scripts import lerobot_train
 
     micro_size, steps = map(int, sys.argv[1:3])
     del sys.argv[1:3]
-    with offline_accumulation(lerobot_train, micro_size, steps):
+    allow_bicubic = sys.argv[1:2] == ["--allow-nondeterministic-bicubic-backward"]
+    if allow_bicubic:
+        del sys.argv[1]
+    with offline_updates(lerobot_train, micro_size, steps, allow_bicubic):
         lerobot_train.main()
 
 

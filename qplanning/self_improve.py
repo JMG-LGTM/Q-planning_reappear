@@ -408,8 +408,14 @@ def run(cfg: "RunConfig", stage: str = "all") -> int:
                 _empty_cuda_cache()
 
             checkpoint_dir = iteration_dir(output_dir, iteration) / "q_checkpoint"
-            loss, global_step = finetune(cfg, q_policy, output_dir, checkpoint_dir,
-                                         source_checkpoint, global_step, iteration)
+            from qplanning.utils.backward_warnings import count_backward_warnings
+
+            with count_backward_warnings(cfg.allow_nondeterministic_bicubic_backward) as tally:
+                with tally.during_update():
+                    loss, global_step = finetune(cfg, q_policy, output_dir, checkpoint_dir,
+                                                 source_checkpoint, global_step, iteration)
+            if cfg.allow_nondeterministic_bicubic_backward:
+                metrics["bicubic_backward_warnings"] = tally.count
             metrics["finetune_loss"] = loss
 
             if policy is not None:

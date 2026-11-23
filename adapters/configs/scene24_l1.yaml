@@ -1,6 +1,7 @@
 extends: ../../configs/base.yaml
 run_name: scene24_l1
 seed: 0
+allow_nondeterministic_bicubic_backward: true
 paths:
   bc_checkpoint: ${env:OPENPI_CHECKPOINT:}
   q_checkpoint: ${env:QPLANNING_Q_CHECKPOINT:}

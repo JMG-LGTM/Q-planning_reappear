@@ -262,3 +262,5 @@ class RunConfig:
     eval: EvalConfig = field(default_factory=EvalConfig)
     train_q: TrainQConfig = field(default_factory=TrainQConfig)
     self_improve: SelfImproveConfig = field(default_factory=SelfImproveConfig)
+    # Applies to offline Q updates and iterative Q refinement.
+    allow_nondeterministic_bicubic_backward: bool = False

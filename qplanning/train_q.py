@@ -125,8 +125,10 @@ def build_argv(cfg: "RunConfig") -> list[str]:
         args += [f"--config_path={resume / 'train_config.json'}", "--resume=true"]
 
     module = ["-m", "lerobot.scripts.lerobot_train"]
-    if train.grad_accum_steps > 1:
+    if train.grad_accum_steps > 1 or cfg.allow_nondeterministic_bicubic_backward:
         module = ["-m", "qplanning.grad_accumulation", str(train.batch_size), str(train.grad_accum_steps)]
+        if cfg.allow_nondeterministic_bicubic_backward:
+            module.append("--allow-nondeterministic-bicubic-backward")
     launcher = [sys.executable, *module]
     if train.num_gpus > 1:
         launcher = [
