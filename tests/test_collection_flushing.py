@@ -131,3 +131,55 @@ def test_replayed_parts_are_reused_and_incomplete_job_is_rejected(tmp_path):
     assert [p.stat().st_mtime_ns for p in files] == times
     (tmp_path / "iter_000" / "collection.json").unlink()
     assert buffer.validate_shards(tmp_path, 0) == ([], parts)
+
+
+@pytest.mark.parametrize("broken", ["unreadable", "missing_part", "all_parts_missing"])
+def test_finetune_rejects_bad_shards_with_a_readable_job(tmp_path, broken):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from qplanning import self_improve
+    from qplanning.config.schema import RunConfig
+
+    healthy = tmp_path / "iter_001" / "online_episodes"
+    (healthy / "meta").mkdir(parents=True)
+    (healthy / "meta" / "info.json").write_text(json.dumps({"total_episodes": 1}))
+    (healthy / "data").mkdir()
+    pq.write_table(pa.table({"action": [0]}), healthy / "data" / "chunk.parquet")
+    if broken == "unreadable":
+        bad = tmp_path / "iter_000" / "online_episodes"
+        (bad / "meta").mkdir(parents=True)
+        (bad / "meta" / "info.json").write_text(json.dumps({"total_episodes": 1}))
+        (bad / "data").mkdir()
+        (bad / "data" / "chunk.parquet").write_bytes(b"truncated")
+    else:
+        job = tmp_path / "iter_000"
+        job.mkdir()
+        names = ["iter_000_part0000", "iter_000_part0001"]
+        (job / "collection.json").write_text(json.dumps({"parts": names}))
+        if broken == "missing_part":
+            (tmp_path / names[0] / "online_episodes").mkdir(parents=True)
+    # The current iteration is readable. The cumulative reader would also open the older job.
+    cfg = RunConfig()
+    cfg.self_improve.min_shards_to_finetune = 1
+    with pytest.raises(RuntimeError, match="unreadable or incomplete.*iter_000"):
+        self_improve.finetune(cfg, None, tmp_path, tmp_path / "checkpoint", "", iteration=1)
+    assert not (tmp_path / "checkpoint").exists()
+
+
+@pytest.mark.parametrize("damaged", ["frame_rows", "episode_rows", "part_manifest"])
+def test_published_part_with_incomplete_contents_is_rejected(tmp_path, damaged):
+    import pyarrow.parquet as pq
+
+    collect_trial(tmp_path, flush_every=2)
+    part, intact = buffer.iteration_dirs(tmp_path)
+    if damaged == "part_manifest":
+        (part.parent / "manifest.json").unlink()
+    else:
+        folder = part / ("data" if damaged == "frame_rows" else "meta/episodes")
+        data_file = next(folder.rglob("*.parquet"))
+        table = pq.read_table(data_file)
+        # The file still has a valid footer, so opening each Parquet alone cannot detect this.
+        pq.write_table(table.slice(0, table.num_rows - 1), data_file)
+    assert buffer.validate_shards(tmp_path, 0) == ([intact], [part])
+    with pytest.raises(RuntimeError, match=part.parent.name):
+        self_improve.finetune(RunConfig(), None, tmp_path, tmp_path / "ckpt", source_checkpoint="unused", iteration=0)

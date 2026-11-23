@@ -41,9 +41,10 @@ eval:
   start_seed: 0
 train_q:
   steps: 40000
+  # Two GPUs × 24 rows per microbatch × 4 accumulation steps = effective batch 192.
   batch_size: 24
-  grad_accum_steps: 2
-  num_gpus: 1
+  grad_accum_steps: 4
+  num_gpus: 2
   save_freq: 1000
   dataset:
     repo_ids: [demos_bc_v1]

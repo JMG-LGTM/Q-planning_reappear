@@ -213,8 +213,8 @@ def finetune(cfg: "RunConfig", q_policy: Any, output_dir: Path, checkpoint_dir: 
     si = cfg.self_improve
     good, quarantined = validate_shards(output_dir, iteration)
     if quarantined:
-        log.warning("%d shard(s) quarantined as unreadable: %s", len(quarantined),
-                    ", ".join(p.parent.name for p in quarantined))
+        names = ", ".join(path.parent.name for path in quarantined)
+        raise RuntimeError(f"unreadable or incomplete collection shards in {output_dir}: {names}")
     minimum = si.resolved_min_shards()
     jobs = {collection_name(path) for path in good}
     if len(jobs) < minimum:
@@ -231,7 +231,7 @@ def finetune(cfg: "RunConfig", q_policy: Any, output_dir: Path, checkpoint_dir: 
         camera_keys=tuple(q_policy.config.camera_keys),
     )
     # A concurrently publishing job may appear between validation and the reader's own glob.
-    if incomplete_parts([Path(ds.root) for ds in online._sub_datasets]):
+    if incomplete_parts([Path(ds.root) for ds in online._sub_datasets], output_dir):
         raise RuntimeError("the online reader opened an incomplete set of collection parts")
     offline = load_demonstrations(si.offline.repo_ids, si.offline.root or "", q_policy)
     log.info("buffer: %d online frames over %d shard(s); %d demonstration frames",

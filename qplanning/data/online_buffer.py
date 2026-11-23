@@ -85,21 +85,38 @@ def collection_name(episodes_dir: Path) -> str:
     return re.sub(r"_part[0-9]+$", "", episodes_dir.parent.name)
 
 
-def incomplete_parts(dirs: Sequence[Path]) -> list[Path]:
+def incomplete_parts(dirs: Sequence[Path], output_dir: Path | None = None) -> list[Path]:
     """A part is trainable only once the job has published its complete ordered index."""
     groups: dict[Path, set[str]] = {}
     for path in dirs:
         job = path.parent.parent / collection_name(path)
         if job != path.parent:
             groups.setdefault(job, set()).add(path.parent.name)
+    if output_dir is not None:
+        for index in output_dir.glob("iter_*/collection.json"):
+            groups.setdefault(index.parent, set())
+        for part in output_dir.glob("iter_*_part[0-9]*"):
+            job = output_dir / collection_name(part / EPISODES_DIRNAME)
+            if job != part and part.is_dir() and not (part / EPISODES_DIRNAME).is_dir():
+                groups.setdefault(job, set()).add(part.name)
+
     bad = []
     for job, names in groups.items():
         try:
-            expected = set(json.loads((job / "collection.json").read_text())["parts"])
-        except (FileNotFoundError, KeyError, json.JSONDecodeError):
-            expected = set()
-        if expected != names or (job / EPISODES_DIRNAME).exists():
-            bad.extend(job.parent / name / EPISODES_DIRNAME for name in sorted(names))
+            expected = json.loads((job / "collection.json").read_text())["parts"]
+        except (FileNotFoundError, KeyError, TypeError, json.JSONDecodeError):
+            expected = []
+        # The index and present directories must agree even when every indexed part is absent.
+        valid_index = isinstance(expected, list) and all(
+            isinstance(name, str) and re.fullmatch(re.escape(job.name) + r"_part[0-9]+", name)
+            for name in expected
+        )
+        declared = set(expected) if valid_index else set()
+        if (not declared or len(declared) != len(expected) or declared != names
+                or (job / EPISODES_DIRNAME).exists()
+                or any(not (job.parent / name / EPISODES_DIRNAME).is_dir() for name in names)):
+            affected = names | declared or {job.name}
+            bad.extend(job.parent / name / EPISODES_DIRNAME for name in sorted(affected))
     return bad
 
 
@@ -191,19 +208,15 @@ class EpisodeParts:
 def validate_shards(output_dir: Path, iteration: int | None = None) -> tuple[list[Path], list[Path]]:
     """Separate readable episode directories from damaged ones.
 
-    A collection job killed mid-write leaves a truncated parquet file behind. Training then
-    fails partway through an epoch with an error that points at the reader rather than at
-    the shard, and the whole iteration is lost. Checking up front costs a directory listing
-    and turns that into a named, skippable shard.
+    Validate the entire cumulative buffer used by OnlineQDataset. When an iteration is
+    specified, count only its readable shards toward the minimum for that iteration.
 
     Returns:
         ``(good, quarantined)`` directories.
     """
     candidates = iteration_dirs(output_dir)
-    incomplete = incomplete_parts(candidates)
-    if iteration is not None:
-        prefix = f"iter_{iteration:03d}"
-        candidates = [p for p in candidates if p.parent.name.startswith(prefix)]
+    incomplete = incomplete_parts(candidates, output_dir)
+    prefix = f"iter_{iteration:03d}" if iteration is not None else None
 
     good: list[Path] = []
     quarantined: list[Path] = list(incomplete)
@@ -211,11 +224,11 @@ def validate_shards(output_dir: Path, iteration: int | None = None) -> tuple[lis
         if episodes_dir in incomplete:
             continue
         problem = _shard_problem(episodes_dir)
-        if problem is None:
-            good.append(episodes_dir)
-        else:
+        if problem is not None:
             quarantined.append(episodes_dir)
             log.warning("quarantining %s: %s", episodes_dir.parent.name, problem)
+        elif prefix is None or episodes_dir.parent.name.startswith(prefix):
+            good.append(episodes_dir)
     return good, quarantined
 
 
@@ -225,7 +238,8 @@ def _shard_problem(episodes_dir: Path) -> str | None:
     if not info.exists():
         return "no meta/info.json (the job probably died before finalising)"
     try:
-        total = json.loads(info.read_text()).get("total_episodes", 0)
+        metadata = json.loads(info.read_text())
+        total = metadata.get("total_episodes", 0)
     except json.JSONDecodeError:
         return "meta/info.json is not valid JSON"
     if not total:
@@ -237,10 +251,19 @@ def _shard_problem(episodes_dir: Path) -> str | None:
     try:
         import pyarrow.parquet as pq
 
-        for path in parquets:
-            pq.read_metadata(path)          # reads the footer; a torn file fails here
+        rows = sum(pq.read_metadata(path).num_rows for path in parquets)
     except ImportError:
         return None                          # cannot check without pyarrow; assume fine
     except Exception as exc:  # noqa: BLE001
         return f"unreadable parquet ({type(exc).__name__})"
+
+    if collection_name(episodes_dir) != episodes_dir.parent.name:
+        try:
+            manifest = json.loads((episodes_dir.parent / "manifest.json").read_text())
+            listed = (episodes_dir / "meta" / "episodes").rglob("*.parquet")
+            episodes = sum(pq.read_metadata(path).num_rows for path in listed)
+            if rows != metadata["total_frames"] or episodes != total or total != manifest["n_saved"]:
+                return "collection part frame or episode counts disagree with its metadata"
+        except Exception as exc:  # noqa: BLE001
+            return f"unreadable collection part metadata ({type(exc).__name__})"
     return None
