@@ -42,6 +42,9 @@ eval:
   episodes_per_task: 100
   start_seed: 0
 train_q:
+  wandb:
+    project: ""
+    entity: ""
   steps: 40000
   # Two GPUs × 24 rows per microbatch × 4 accumulation steps = effective batch 192.
   batch_size: 24
@@ -52,6 +55,9 @@ train_q:
     repo_ids: [rollouts_with_demos]
     bucket_overrides: {rollouts_with_demos: episode_labels}
 self_improve:
+  wandb:
+    project: ""
+    entity: ""
   iterations: 3
   train_episodes_per_task: 100
   heldout_episodes_per_task: 0
