@@ -30,6 +30,7 @@ execution:
   n_action_steps: 8
 qfunction:
   h: 10
+  terminal_bonuses: {q5: 1.0, play: 0.0}
   camera_keys: [observation.images.image, observation.images.wrist_image]
 planner:
   type: q_weighted
@@ -48,8 +49,8 @@ train_q:
   num_gpus: 2
   save_freq: 1000
   dataset:
-    repo_ids: [demos_bc_v1]
-    bucket_overrides: {demos_bc_v1: q5}
+    repo_ids: [rollouts_with_demos]
+    bucket_overrides: {rollouts_with_demos: episode_labels}
 self_improve:
   iterations: 3
   train_episodes_per_task: 100
